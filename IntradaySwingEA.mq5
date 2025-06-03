@@ -45,10 +45,14 @@ CTrade          trade;                       // Trade object
 bool            shutdownFlag        = false; // Module 9: Emergency shutdown flag
 datetime        lastDay             = 0;     // Module 9: Track last trading day
 int             consecutiveLosses   = 0;     // Module 8: Consecutive losses counter
+datetime        lockoutStartTime    = 0;     // Module 8: When consecutive-loss lockout began
 int             dailyTradeCount     = 0;     // Module 8: Trades taken today
 double          dailyStartEquity    = 0.0;   // Module 8: Equity at start of day
 double          highestIntradayEquity = 0.0; // Module 8: Highest intraday equity
 double          lowestIntradayEquity  = 0.0; // Module 8: Lowest intraday equity
+ulong           partialTickets[32];          // Track tickets with partial close
+bool            partialDone[32];
+int             partialCount = 0;
 
 //--- Function Prototypes
 
@@ -317,8 +321,37 @@ bool IsVolatilityNormal(string symbol)
 
 double GetRollingCorrelation(string symA, string symB)
   {
-   // Placeholder: return 0.0. In practice, pull 20‐bar closing prices and compute correlation.
-   return 0.0;
+   const int bars = 20;
+   double a[bars];
+   double b[bars];
+
+   if(CopyClose(symA, PERIOD_M15, 1, bars, a) != bars)
+      return 0.0;
+   if(CopyClose(symB, PERIOD_M15, 1, bars, b) != bars)
+      return 0.0;
+
+   double meanA = 0.0, meanB = 0.0;
+   for(int i=0; i<bars; i++)
+     {
+      meanA += a[i];
+      meanB += b[i];
+     }
+   meanA /= bars;
+   meanB /= bars;
+
+   double cov=0.0, varA=0.0, varB=0.0;
+   for(int i=0;i<bars;i++)
+     {
+      double da=a[i]-meanA;
+      double db=b[i]-meanB;
+      cov  += da*db;
+      varA += da*da;
+      varB += db*db;
+     }
+   double denom = MathSqrt(varA*varB);
+   if(denom==0.0) return 0.0;
+   double corr = cov/denom;
+   return corr;
   }
 
 //+------------------------------------------------------------------+
@@ -365,7 +398,31 @@ bool EntryAllowedByTime()
 
 bool EntryAllowedByNews()
   {
-   // Placeholder: read from CSV or news API. Return true if no high/medium news in window.
+   string file = "news_events.csv";
+   int handle = FileOpen(file, FILE_READ|FILE_CSV|FILE_COMMON);
+   if(handle == INVALID_HANDLE)
+      return true; // No news file
+
+   datetime now = TimeTradeServer();
+   while(!FileIsEnding(handle))
+     {
+      string dateStr = FileReadString(handle);
+      string timeStr = FileReadString(handle);
+      string impact  = FileReadString(handle);
+      if(FileIsEnding(handle)) break;
+      datetime eventTime = StringToTime(dateStr + " " + timeStr);
+      if(eventTime==0) continue;
+
+      int diffMin = (int)MathAbs((now - eventTime)/60);
+      impact = StringTrim(impact);
+      if((StringFind(StringToLower(impact), "high") >= 0 && diffMin <= 10) ||
+         (StringFind(StringToLower(impact), "medium") >= 0 && diffMin <= 5))
+        {
+         FileClose(handle);
+         return false;
+        }
+     }
+   FileClose(handle);
    return true;
   }
 
@@ -386,8 +443,13 @@ bool EntryAllowedByConsecLoss()
   {
    if(Use_Consecutive_Loss_Lockout && consecutiveLosses >= Consec_Loss_Limit)
      {
-      // Check if lockout duration has passed (store timestamp when lockout started if needed)
-      return false;
+      if(lockoutStartTime==0)
+         lockoutStartTime = TimeTradeServer();
+      if(TimeTradeServer() - lockoutStartTime < Lockout_Duration_Minutes*60)
+         return false;
+      // Lockout period over
+      consecutiveLosses = 0;
+      lockoutStartTime  = 0;
      }
    return true;
   }
@@ -459,6 +521,13 @@ void ManageOpenTrades()
       double atrPips   = GetATR(symbol, PERIOD_M15, ATR_Period);
       double atrPoints = atrPips * SymbolInfoDouble(symbol, SYMBOL_POINT);
 
+      bool isBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+
+      // helper: check if partial already executed
+      bool partialAlready=false;
+      for(int p=0;p<partialCount;p++)
+        if(partialTickets[p]==ticket) { partialAlready=partialDone[p]; break; }
+
       // Calculate unrealized profit in pips
       double profitPips = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
                            ? (currentPrice - entryPrice) / SymbolInfoDouble(symbol, SYMBOL_POINT)
@@ -481,13 +550,40 @@ void ManageOpenTrades()
 
       // Partial close at 2×ATR
       double twoR = 2.0 * atrPips;
-      if(Use_Partial_Profit && profitPips >= twoR && volume > SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP))
+      if(Use_Partial_Profit && profitPips >= twoR && !partialAlready &&
+         volume > SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP))
         {
          double partialLots = volume / 2.0;
-         if(partialLots < SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP)) partialLots = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+         if(partialLots < SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP))
+            partialLots = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
 
-         trade.PositionClosePartial(ticket, partialLots);
-         LogTradeEvent("PARTIAL_CLOSE", symbol, partialLots, currentPrice, sl, tp, 0.0);
+         if(trade.PositionClosePartial(ticket, partialLots))
+           {
+            LogTradeEvent("PARTIAL_CLOSE", symbol, partialLots, currentPrice, sl, tp, 0.0);
+            if(partialCount < ArraySize(partialTickets))
+              {
+               partialTickets[partialCount] = ticket;
+               partialDone[partialCount]    = true;
+               partialCount++;
+              }
+           }
+        }
+
+      // Trail stop at pivot - 0.75×ATR once +2×ATR reached
+      if(profitPips >= twoR)
+        {
+         double pivot = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+                         ? iHigh(symbol, PERIOD_M15, 1)
+                         : iLow(symbol, PERIOD_M15, 1);
+         double trailSL = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+                           ? pivot - 0.75*atrPoints
+                           : pivot + 0.75*atrPoints;
+         if((PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY && trailSL > sl) ||
+            (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL && trailSL < sl))
+           {
+            trade.PositionModify(ticket, trailSL, tp);
+            LogTradeEvent("TRAIL_SL", symbol, volume, currentPrice, trailSL, tp, 0.0);
+           }
         }
 
       // Final trailing to 3×ATR or 4×ATR
@@ -555,21 +651,31 @@ void ResetAtNewDay()
 //+------------------------------------------------------------------+
 void LogTradeEvent(string eventType, string symbol, double lotSize, double price, double sl, double tp, double profit)
   {
-   // Example: Print to Experts tab; in practice, write to file
-   string msg = TimeToString(TimeTradeServer(), TIME_DATE|TIME_SECONDS) + " | " +
-                eventType + " | " + symbol + " | Lot=" + DoubleToString(lotSize,2) +
-                " | Price=" + DoubleToString(price, _Digits) +
-                " | SL=" + DoubleToString(sl, _Digits) +
-                " | TP=" + DoubleToString(tp, _Digits) +
-                " | Profit=" + DoubleToString(profit,2);
-   Print(msg);
+   string msg = TimeToString(TimeTradeServer(), TIME_DATE|TIME_SECONDS) + "," +
+                eventType + "," + symbol + "," + DoubleToString(lotSize,2) + "," +
+                DoubleToString(price,_Digits) + "," + DoubleToString(sl,_Digits) + "," +
+                DoubleToString(tp,_Digits) + "," + DoubleToString(profit,2);
+   string fname = "trade_log_" + TimeToString(TimeTradeServer(), TIME_DATE) + ".csv";
+   int handle = FileOpen(fname, FILE_WRITE|FILE_READ|FILE_CSV|FILE_COMMON|FILE_SHARE_WRITE|FILE_SHARE_READ);
+   if(handle!=INVALID_HANDLE)
+     {
+      FileSeek(handle,0,SEEK_END);
+      FileWrite(handle,msg);
+      FileClose(handle);
+     }
   }
 
 void LogDiagnosticEvent(string message)
   {
-   // Example: Print to Experts tab with [DIAG] prefix
    string msg = TimeToString(TimeTradeServer(), TIME_DATE|TIME_SECONDS) + " | [DIAG] " + message;
-   Print(msg);
+   string fname = "diag_log_" + TimeToString(TimeTradeServer(), TIME_DATE) + ".txt";
+   int handle = FileOpen(fname, FILE_WRITE|FILE_READ|FILE_TXT|FILE_COMMON|FILE_SHARE_WRITE|FILE_SHARE_READ);
+   if(handle!=INVALID_HANDLE)
+     {
+      FileSeek(handle,0,SEEK_END);
+      FileWriteString(handle,msg+"\n");
+      FileClose(handle);
+     }
   }
 
 void SendEmailPush(string subject, string body)
@@ -592,7 +698,15 @@ void WriteDailySummary()
    summary += "High Equity: "    + DoubleToString(highestIntradayEquity,2) + "\n";
    summary += "Low Equity: "     + DoubleToString(lowestIntradayEquity,2) + "\n";
    summary += "Consec Losses: "  + IntegerToString(consecutiveLosses) + "\n";
-   Print(summary);
+
+   string fname = "summary_" + TimeToString(lastDay, TIME_DATE) + ".txt";
+   int handle = FileOpen(fname, FILE_WRITE|FILE_READ|FILE_TXT|FILE_COMMON|FILE_SHARE_WRITE|FILE_SHARE_READ);
+   if(handle!=INVALID_HANDLE)
+     {
+      FileSeek(handle,0,SEEK_END);
+      FileWriteString(handle,summary+"\n");
+      FileClose(handle);
+     }
 
    if(StringCompare(Mode, "LIVE") == 0)
       SendEmailPush("Daily EA Summary", summary);
