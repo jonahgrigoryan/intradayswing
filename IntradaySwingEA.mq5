@@ -105,7 +105,7 @@ int OnInit()
    dailyStartEquity      = AccountInfoDouble(ACCOUNT_EQUITY);
    highestIntradayEquity = dailyStartEquity;
    lowestIntradayEquity  = dailyStartEquity;
-   lastDay               = TimeTradeServer();
+   lastDay               = TimeCurrent();
 
    // Set timer to 60 seconds for OnTimer execution
    EventSetTimer(60);
@@ -417,8 +417,9 @@ bool M15EngulfingSignal(string symbol)
 
 bool EntryAllowedByTime()
   {
-   int hour = TimeHour(TimeTradeServer());
-   int dayOfWeek = TimeDayOfWeek(TimeTradeServer());
+   datetime now = TimeCurrent();
+   int hour      = TimeHour(now);
+   int dayOfWeek = TimeDayOfWeek(now);
    // Allow Mon–Fri only, between session hours
    if(dayOfWeek == 0 || dayOfWeek == 6) return false; // Sunday=0, Saturday=6
    if(hour < TradingSession_Start || hour >= TradingSession_End) return false;
@@ -434,7 +435,7 @@ bool EntryAllowedByNews()
    if(handle == INVALID_HANDLE)
       return true; // No news file
 
-   datetime now = TimeTradeServer();
+   datetime now = TimeCurrent();
    while(!FileIsEnding(handle))
      {
       string dateStr = FileReadString(handle);
@@ -447,7 +448,8 @@ bool EntryAllowedByNews()
       int diffMin = (int)MathAbs((now - eventTime)/60);
       StringTrimLeft(impact);
       StringTrimRight(impact);
-      string impactLower = StringToLower(impact);
+      string impactLower = impact;
+      StringToLower(impactLower);
       if((StringFind(impactLower, "high") >= 0 && diffMin <= 10) ||
          (StringFind(impactLower, "medium") >= 0 && diffMin <= 5))
         {
@@ -477,8 +479,8 @@ bool EntryAllowedByConsecLoss()
    if(Use_Consecutive_Loss_Lockout && consecutiveLosses >= Consec_Loss_Limit)
      {
       if(lockoutStartTime==0)
-         lockoutStartTime = TimeTradeServer();
-      if(TimeTradeServer() - lockoutStartTime < Lockout_Duration_Minutes*60)
+         lockoutStartTime = TimeCurrent();
+      if(TimeCurrent() - lockoutStartTime < Lockout_Duration_Minutes*60)
          return false;
       // Lockout period over
       consecutiveLosses = 0;
@@ -640,7 +642,7 @@ void ManageOpenTrades()
 //+------------------------------------------------------------------+
 void CheckDailyDrawdown()
   {
-   datetime now = TimeTradeServer();
+   datetime now = TimeCurrent();
    int      today = TimeDay(now);
    // Recalculate highest/lowest intraday equity
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
@@ -663,7 +665,7 @@ void CheckDailyDrawdown()
 
 void ResetAtNewDay()
   {
-   datetime now   = TimeTradeServer();
+   datetime now   = TimeCurrent();
    int      day   = TimeDay(now);
    if(day != TimeDay(lastDay))
      {
@@ -684,11 +686,11 @@ void ResetAtNewDay()
 //+------------------------------------------------------------------+
 void LogTradeEvent(string eventType, string symbol, double lotSize, double price, double sl, double tp, double profit)
   {
-   string msg = TimeToString(TimeTradeServer(), TIME_DATE|TIME_SECONDS) + "," +
+   string msg = TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS) + "," +
                 eventType + "," + symbol + "," + DoubleToString(lotSize,2) + "," +
                 DoubleToString(price,_Digits) + "," + DoubleToString(sl,_Digits) + "," +
                 DoubleToString(tp,_Digits) + "," + DoubleToString(profit,2);
-   string fname = "trade_log_" + TimeToString(TimeTradeServer(), TIME_DATE) + ".csv";
+   string fname = "trade_log_" + TimeToString(TimeCurrent(), TIME_DATE) + ".csv";
    int handle = FileOpen(fname, FILE_WRITE|FILE_READ|FILE_CSV|FILE_COMMON|FILE_SHARE_WRITE|FILE_SHARE_READ);
    if(handle!=INVALID_HANDLE)
      {
@@ -700,8 +702,8 @@ void LogTradeEvent(string eventType, string symbol, double lotSize, double price
 
 void LogDiagnosticEvent(string message)
   {
-   string msg = TimeToString(TimeTradeServer(), TIME_DATE|TIME_SECONDS) + " | [DIAG] " + message;
-   string fname = "diag_log_" + TimeToString(TimeTradeServer(), TIME_DATE) + ".txt";
+   string msg = TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS) + " | [DIAG] " + message;
+   string fname = "diag_log_" + TimeToString(TimeCurrent(), TIME_DATE) + ".txt";
    int handle = FileOpen(fname, FILE_WRITE|FILE_READ|FILE_TXT|FILE_COMMON|FILE_SHARE_WRITE|FILE_SHARE_READ);
    if(handle!=INVALID_HANDLE)
      {
