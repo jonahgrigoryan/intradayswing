@@ -175,8 +175,19 @@ void OnTick()
             // Module 3: Calculate SL/TP
             double atr    = GetATR(sym, PERIOD_M15, ATR_Period);
             double slPips = SL_ATR_Mult * atr;
-            double tpPips = Use_Adaptive_TP_SL && (iRSI(sym, PERIOD_M15, RSI_Period, PRICE_CLOSE, 0) > 80) 
-                            ? TP_ATR_Mult_HighMomentum * atr 
+            // Obtain current RSI value for adaptive TP logic
+            double rsiVal = 0.0;
+            int rsiHandle = iRSI(sym, PERIOD_M15, RSI_Period, PRICE_CLOSE);
+            if(rsiHandle != INVALID_HANDLE)
+              {
+               double rsiBuf[1];
+               if(CopyBuffer(rsiHandle,0,0,1,rsiBuf)==1)
+                  rsiVal = rsiBuf[0];
+               IndicatorRelease(rsiHandle);
+              }
+
+            double tpPips = Use_Adaptive_TP_SL && rsiVal > 80
+                            ? TP_ATR_Mult_HighMomentum * atr
                             : TP_ATR_Mult * atr;
 
             // Module 5: Calculate lot size by risk
@@ -326,8 +337,10 @@ bool IsVolatilityNormal(string symbol)
 double GetRollingCorrelation(string symA, string symB)
   {
    const int bars = 20;
-   double a[bars];
-   double b[bars];
+   double a[];
+   double b[];
+   ArrayResize(a,bars);
+   ArrayResize(b,bars);
 
    if(CopyClose(symA, PERIOD_M15, 1, bars, a) != bars)
       return 0.0;
@@ -432,9 +445,11 @@ bool EntryAllowedByNews()
       if(eventTime==0) continue;
 
       int diffMin = (int)MathAbs((now - eventTime)/60);
-      impact = StringTrimLeft(StringTrimRight(impact));
-      if((StringFind(StringToLower(impact), "high") >= 0 && diffMin <= 10) ||
-         (StringFind(StringToLower(impact), "medium") >= 0 && diffMin <= 5))
+      StringTrimLeft(impact);
+      StringTrimRight(impact);
+      string impactLower = StringToLower(impact);
+      if((StringFind(impactLower, "high") >= 0 && diffMin <= 10) ||
+         (StringFind(impactLower, "medium") >= 0 && diffMin <= 5))
         {
          FileClose(handle);
          return false;
