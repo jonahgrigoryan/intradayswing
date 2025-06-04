@@ -234,19 +234,15 @@ bool IsSpreadAcceptable(string symbol)
 
 bool HasSufficientMargin(string symbol, double lotSize, double slPips)
   {
-   double marginRequired = 0.0;
-   double freeMargin     = AccountInfoDouble(ACCOUNT_FREEMARGIN);
-   // Estimate margin for lotSize; use symbol info
-   if(!SymbolInfoDouble(symbol, SYMBOL_MARGIN_REQUIRED, marginRequired))
-     marginRequired = 0.0;
-   // Apply buffer equal to SL distance in account currency
+   double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+   double marginPerLot = SymbolInfoDouble(symbol, SYMBOL_MARGIN_INITIAL);
+   double marginRequired = marginPerLot * lotSize;
    double buffer = slPips * lotSize * SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
    if(freeMargin < (marginRequired + buffer))
      {
       LogDiagnosticEvent("Insufficient margin for " + symbol);
       return false;
      }
-   // Margin level check
    double marginLevel = AccountInfoDouble(ACCOUNT_MARGIN_LEVEL);
    if(marginLevel > 0 && marginLevel < 150.0)
      {
@@ -259,7 +255,7 @@ bool HasSufficientMargin(string symbol, double lotSize, double slPips)
 bool IsCorrelatedTradeAllowed(string symbol)
   {
    // If only one pair is open, allow. If multiple, check correlation.
-   if(ArraySize(trade.OrdersTotal()) <= 1) return true;
+   if(PositionsTotal() <= 1) return true;
 
    // Example: Check EURUSD vs. GBPUSD. In practice, loop through open symbols.
    string otherSymbols[][2] = { {"EURUSD","GBPUSD"}, {"EURUSD","USDJPY"}, {"GBPUSD","XAUUSD"} };
@@ -285,21 +281,29 @@ bool IsCorrelatedTradeAllowed(string symbol)
 //+------------------------------------------------------------------+
 string GetH1TrendDirection()
   {
-   double emaFast = iMA(_Symbol, PERIOD_H1, FastEMA, 0, MODE_EMA, PRICE_CLOSE, 0);
-   double emaSlow = iMA(_Symbol, PERIOD_H1, SlowEMA, 0, MODE_EMA, PRICE_CLOSE, 0);
-   double price   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   if(price > emaFast && price > emaSlow) return "bullish";
-   if(price < emaFast && price < emaSlow) return "bearish";
+   int hFast = iMA(_Symbol, PERIOD_H1, FastEMA, 0, MODE_EMA, PRICE_CLOSE);
+   int hSlow = iMA(_Symbol, PERIOD_H1, SlowEMA, 0, MODE_EMA, PRICE_CLOSE);
+   if(hFast==INVALID_HANDLE || hSlow==INVALID_HANDLE) return "neutral";
+   double fast[1], slow[1];
+   if(CopyBuffer(hFast,0,0,1,fast)!=1 || CopyBuffer(hSlow,0,0,1,slow)!=1){ IndicatorRelease(hFast); IndicatorRelease(hSlow); return "neutral";}
+   IndicatorRelease(hFast); IndicatorRelease(hSlow);
+   double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(price > fast[0] && price > slow[0]) return "bullish";
+   if(price < fast[0] && price < slow[0]) return "bearish";
    return "neutral";
   }
 
 string GetH4TrendDirection()
   {
-   double emaFast = iMA(_Symbol, PERIOD_H4, FastEMA, 0, MODE_EMA, PRICE_CLOSE, 0);
-   double emaSlow = iMA(_Symbol, PERIOD_H4, SlowEMA, 0, MODE_EMA, PRICE_CLOSE, 0);
-   double price   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   if(price > emaFast && price > emaSlow) return "bullish";
-   if(price < emaFast && price < emaSlow) return "bearish";
+   int hFast = iMA(_Symbol, PERIOD_H4, FastEMA, 0, MODE_EMA, PRICE_CLOSE);
+   int hSlow = iMA(_Symbol, PERIOD_H4, SlowEMA, 0, MODE_EMA, PRICE_CLOSE);
+   if(hFast==INVALID_HANDLE || hSlow==INVALID_HANDLE) return "neutral";
+   double fast[1], slow[1];
+   if(CopyBuffer(hFast,0,0,1,fast)!=1 || CopyBuffer(hSlow,0,0,1,slow)!=1){ IndicatorRelease(hFast); IndicatorRelease(hSlow); return "neutral";}
+   IndicatorRelease(hFast); IndicatorRelease(hSlow);
+   double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(price > fast[0] && price > slow[0]) return "bullish";
+   if(price < fast[0] && price < slow[0]) return "bearish";
    return "neutral";
   }
 
@@ -359,8 +363,18 @@ double GetRollingCorrelation(string symA, string symB)
 //+------------------------------------------------------------------+
 bool M15RSISignal(string symbol)
   {
-   double rsiCurrent = iRSI(symbol, PERIOD_M15, RSI_Period, PRICE_CLOSE, 0);
-   double rsiPrev    = iRSI(symbol, PERIOD_M15, RSI_Period, PRICE_CLOSE, 1);
+   int handle = iRSI(symbol, PERIOD_M15, RSI_Period, PRICE_CLOSE);
+   if(handle==INVALID_HANDLE)
+      return false;
+   double rsiBuf[2];
+   if(CopyBuffer(handle,0,0,2,rsiBuf)!=2)
+     {
+      IndicatorRelease(handle);
+      return false;
+     }
+   IndicatorRelease(handle);
+   double rsiCurrent = rsiBuf[0];
+   double rsiPrev    = rsiBuf[1];
    if(rsiPrev < RSI_Oversold && rsiCurrent > RSI_Oversold)
      return true; // Bullish cross from oversold
    if(rsiPrev > RSI_Overbought && rsiCurrent < RSI_Overbought)
@@ -370,16 +384,20 @@ bool M15RSISignal(string symbol)
 
 bool M15EngulfingSignal(string symbol)
   {
-   MqlRates  prevCandle, lastCandle;
-   if(CopyRates(symbol, PERIOD_M15, 1, 2, &prevCandle) < 2) return false;
-   if(CopyRates(symbol, PERIOD_M15, 0, 1, &lastCandle) < 1) return false;
-   bool bullishEngulf = lastCandle.open < prevCandle.open && lastCandle.close > prevCandle.close && lastCandle.close > lastCandle.open;
-   bool bearishEngulf = lastCandle.open > prevCandle.open && lastCandle.close < prevCandle.close && lastCandle.close < lastCandle.open;
-   // Only accept near EMA(50)
-   double ema50 = iMA(symbol, PERIOD_M15, 50, 0, MODE_EMA, PRICE_CLOSE, 1);
-   if(bullishEngulf && lastCandle.low <= ema50 * (1 + SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE)/10000))
+   MqlRates prev[1], last[1];
+   if(CopyRates(symbol, PERIOD_M15, 1, 1, prev) != 1) return false;
+   if(CopyRates(symbol, PERIOD_M15, 0, 1, last) != 1) return false;
+   bool bullishEngulf = last[0].open < prev[0].open && last[0].close > prev[0].close && last[0].close > last[0].open;
+   bool bearishEngulf = last[0].open > prev[0].open && last[0].close < prev[0].close && last[0].close < last[0].open;
+   int emaHandle = iMA(symbol, PERIOD_M15, 50, 0, MODE_EMA, PRICE_CLOSE);
+   if(emaHandle==INVALID_HANDLE) return false;
+   double emaBuf[1];
+   if(CopyBuffer(emaHandle,0,1,1,emaBuf)!=1) { IndicatorRelease(emaHandle); return false; }
+    // Only accept near EMA(50)
+   double ema50 = emaBuf[0];
+   if(bullishEngulf && last[0].low <= ema50 * (1 + SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE)/10000))
      return true;
-   if(bearishEngulf && lastCandle.high >= ema50 * (1 - SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE)/10000))
+   if(bearishEngulf && last[0].high >= ema50 * (1 - SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE)/10000))
      return true;
    return false;
   }
@@ -414,7 +432,7 @@ bool EntryAllowedByNews()
       if(eventTime==0) continue;
 
       int diffMin = (int)MathAbs((now - eventTime)/60);
-      impact = StringTrim(impact);
+      impact = StringTrimLeft(StringTrimRight(impact));
       if((StringFind(StringToLower(impact), "high") >= 0 && diffMin <= 10) ||
          (StringFind(StringToLower(impact), "medium") >= 0 && diffMin <= 5))
         {
@@ -681,7 +699,7 @@ void LogDiagnosticEvent(string message)
 void SendEmailPush(string subject, string body)
   {
    // SendMail or PushNotification based on user setup
-   if(!StringIsEmpty(subject) && !StringIsEmpty(body))
+   if(StringLen(subject)>0 && StringLen(body)>0)
      {
       SendNotification(subject + ": " + body);
      }
